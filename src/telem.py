@@ -56,6 +56,9 @@ class TelemDataHandler:
             if self._exec_stint_util(file, csv_filename) == 0:
                 # successfully extracted data from the .ibt file
                 to_upload.append(csv_filename)
+
+                # delete file after the data is extracted
+                file.unlink()
             
         return to_upload
 

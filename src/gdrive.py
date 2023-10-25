@@ -31,8 +31,6 @@ class DriveApiHandler:
 
         hasher = sha256()
         hasher.update(file.getvalue())
-        print(checksum)
-        print(hasher.hexdigest())
         if hasher.hexdigest() == checksum:
             with open(filepath, 'wb') as f:
                 f.write(file.getvalue())
