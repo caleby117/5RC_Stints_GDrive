@@ -48,7 +48,6 @@ class TelemDataHandler:
 
     def process_ibt_files(self, files):
         # Process the ibt files with the executable
-import os
         # process the ibt files by file name 
         filenames = list(map(lambda x: x['name'], files))
         to_upload = []
