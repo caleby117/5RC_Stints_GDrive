@@ -6,40 +6,59 @@ from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 import io
 from hashlib import sha256
 import pathlib
+from filemeta import IbtFileMeta, CsvFileMeta, TelemetryFiles
+from queue import Queue
+
+VERIFY_TYPE = "sha256Checksum"
+
+class SHAVerifier:
+    cur_digest = ""
+    @staticmethod
+    def verify(file, expected_digest):
+        hasher = sha256()
+        # file: bytes io obj
+        hasher.update(file.getvalue())
+        SHAVerifier.cur_digest = hasher.hexdigest()
+        return (hasher.hexdigest(), hasher.hexdigest() == expected_digest)
 
 
 class DriveApiHandler:
     def __init__(self, creds_file, scope=["https://www.googleapis.com/auth/drive"]):
         self.creds = service_account.Credentials.from_service_account_file(filename=creds_file, scopes=scope)
         self.drive = build("drive", "v3", credentials=self.creds)
-        self.activity = build("driveactivity", "v2", credentials=self.creds)
 
 
-    def download_file(self, fileid, filepath):
-        content_request = self.drive.files().get_media(fileId=fileid, acknowledgeAbuse=True)
+    def download_file(self, file_meta):
+        content_request = self.drive.files().get_media(fileId=file_meta.ibt.g_id, acknowledgeAbuse=True)
         file = io.BytesIO()
         downloader = MediaIoBaseDownload(file, content_request)
         done = False
+        print(f"Downloading to {file_meta.ibt.path}: {0:>3}%\r", end='')
         while not done:
             status, done = downloader.next_chunk()
-            print(f"Downloading to {filepath}: {int(status.progress()*100)}%\r", end='')
+            print(f"Downloading to {file_meta.ibt.path}: {int(status.progress()*100)}%\r", end='')
         print()
 
-        verify_type = "sha256Checksum"
-
-        checksum = self.drive.files().get(fileId=fileid, fields=verify_type).execute()[verify_type]
-
-        hasher = sha256()
-        hasher.update(file.getvalue())
-        if hasher.hexdigest() == checksum:
-            with open(filepath, 'wb') as f:
+        digest, verified = SHAVerifier.verify(file, file_meta.ibt.g_checksum)
+        if not verified:
+            print("File Integrity failed.") 
+            print(f"Expected: {file_meta.ibt.g_checksum}\nGot: {digest}")
+            print(f"Ignoring file {file_meta.ibt.name}")
+            return False
+        
+        ret = True
+        with open(file_meta.ibt.path, 'wb') as f:
+            try:
                 f.write(file.getvalue())
+            except OSError as e:
+                print(e)
+                print(f"OS Error. Ignoring file {file_meta.ibt.name}")
+                ret = False
 
-        else:
-            raise IOError(f"File Integrity failed. \nExpected: {checksum}\nGot: {hasher.hexdigest()}")
+        return ret
 
-    def get_folder_id(self, name, parent=None):
-        if not name:
+    def get_folder_id(self, pattern, parent=None):
+        if not pattern:
             return ''
 
         '''
@@ -48,30 +67,46 @@ class DriveApiHandler:
             find id of telemetry folder
             call getFolderId(csv, parent=telemetry_id)
         '''
-        return self._traverse_nested(self._get_folder_id_priv, name)
+        return self._traverse_nested(self._get_folder_id_priv, pattern)
 
 
-    def get_ibt_file_info(self, folder_id):
+    def get_ibt_file_info(self, folder_id, namecontains=".ibt"):
 
         #Finds ibt files in the folder_id
-        query = f"mimeType='application/octet-stream' and name contains '.ibt' and '{folder_id}' in parents"
-        fields = 'files(id, name)'
-        results = self._api_call(self.drive.files().list, path='files', q=query, fields=fields)
-        return results
+        query = f"name contains '{namecontains}' and '{folder_id}' in parents"
+        results = self._api_call(self.drive.files().list, path='files', q=query, fields=IbtFileMeta.fields)
+        if not results:
+            raise IOError(f"{results=}, {IbtFileMeta.fields=}, {query=}")
+        return map(
+                lambda x: IbtFileMeta(
+                    x["name"], 
+                    x["id"], 
+                    x["mimeType"], 
+                    x["sha256Checksum"], 
+                    folder_id), 
+                results
+            )
 
 
-    def upload_file(self, csv_to_upload, parentid='', meta_mimetype='', upload_mimetype=''):
+    def upload_file(self, file): #csv_to_upload, parentid='', meta_mimetype='', upload_mimetype=''):
+        # Takes in filemeta obj and returns same object but updated
         # Returns file id
         metadata = {
-            "name": csv_to_upload.name,
-            "mimeType": meta_mimetype,
-            "parents": [parentid]
+            "name": file.csv.path.name,
+            "mimeType": file.csv.mimeType,
+            "parents": [file.csv.g_parentid]
         }
-        media = MediaFileUpload(csv_to_upload.as_posix(), mimetype=upload_mimetype, resumable=True)
-        print(f"Uploading file {csv_to_upload.as_posix()}")
-        file = self.drive.files().create(body=metadata, media_body=media, fields='id').execute()
-        
-        return file["id"]
+        media = MediaFileUpload(file.csv.path.as_posix(), mimetype=file.csv.mimeType, resumable=False)
+        print(f"Uploading file {file.csv.path.as_posix()}")
+        try:
+            g_file = self.drive.files().create(body=metadata, uploadType="multipart", media_body=media, fields='id').execute()
+        except HttpError as e:
+            print(e)
+            print(f"IGNORING {file.csv.path.as_posix()}")
+        else:
+            file.csv.g_id = g_file["id"]
+
+        return file
 
 
     def _get_folder_id_priv(self, name, parent=None, **kwargs):
@@ -116,6 +151,8 @@ class DriveApiHandler:
     
     def _api_call(self, method, path=None, **kwargs):
         result = method(**kwargs).execute()
+        if not result:
+            raise IOError(f"{result=}, {kwargs=}")
         if path:
             return self._traverse_nested(self._dict_get_wrapper, path, resource=result)
         return result

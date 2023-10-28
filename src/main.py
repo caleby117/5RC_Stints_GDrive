@@ -1,13 +1,8 @@
 from gdrive import DriveApiHandler
 from telem import TelemDataHandler
 from pathlib import Path
+from telempaths import ROOT, CREDS, IBT_READER_PATH, TELEM_DL_FOLDER, TELEM_CSV_FOLDER
 
-
-ROOT = Path(__file__).parent.parent
-CREDS = ROOT / "creds" / "google_creds.json"
-IBT_READER_PATH = ROOT/"telem"/"util"
-TELEM_DL_FOLDER =  ROOT / "telem" / "ibt"
-TELEM_CSV_FOLDER = TELEM_DL_FOLDER.parent / "csv"
 
 def main():
     '''
@@ -35,6 +30,7 @@ def main():
     ibt_files = telem.download_unprocessed_ibt()
     csv_to_upload = telem.process_ibt_files(ibt_files)
     uploaded_files = telem.upload_csv_files(csv_to_upload)
+    print(uploaded_files)
     
 
 

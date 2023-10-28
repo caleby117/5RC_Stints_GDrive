@@ -1,16 +1,17 @@
 # syntax=docker/dockerfile:1
-ENV UTIL_SRC 5RC_Stint_Time_Util/src/5RC_Stint_Time_Util/
 
 FROM alpine:latest as build
-WORKDIR /build
-RUN git clone https://github.com/caleby117/5RC_Stint_Time_Util.git && git checkout linux_compatibility
+RUN apk add git make g++
+RUN git clone -b linux_compatibility https://github.com/caleby117/5RC_Stint_Time_Util.git && cd 5RC_Stint_Time_Util
+WORKDIR 5RC_Stint_Time_Util
 RUN cd src/5RC_Stint_Time_Util/ && make
 
-FROM python:latest
+FROM python:3.9.18-alpine3.18
 WORKDIR .
-RUN git clone https://github.com/caleby117/5RC_Stints_GDrive.git && cd 5RC_Stints_GDrive
-COPY --from=build /build/$UITL/elf/5RC_Stint_Time_Util ./telem/util
-COPY --from=build /build/$UTIL/SampleVars.txt ./telem/SampleVars.txt
+COPY ./src ./src
+COPY ./requirements.txt ./requirements.txt
+COPY --from=build /5RC_Stint_Time_Util/src/5RC_Stint_Time_Util/elf/5RC_Stint_Time_Util ./telem/util
+COPY --from=build /5RC_Stint_Time_Util/src/5RC_Stint_Time_Util/SampleVars.txt ./telem/SampleVars.txt
 COPY ./creds ./creds
 RUN pip install -r requirements.txt
 CMD ["python3", "src/main.py"]
