@@ -7,9 +7,10 @@ from telempaths import ROOT, CREDS, IBT_READER_PATH, TELEM_DL_FOLDER, TELEM_CSV_
 def main():
     '''
     main.py:
-        - Gets all new ibt files that have been uploaded to the google drive in the past x minutes
+        - Searches the google drive for .ibt files to download
         - Downloads the ibt files into some temp storage and runs the 5RC_Stint_Time_Util on it to produce a csv file
         - Uploads the csv file to the drive
+        - Removes the temp storage
 
     '''
 

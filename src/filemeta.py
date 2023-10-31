@@ -13,9 +13,10 @@ class IbtFileMeta(FileMeta):
     g_id: str
     g_mimeType: str
     g_checksum: str
+    filesize: int
     g_parentid: str
 
-    fields: ClassVar[str] = "files(mimeType, id, name, sha256Checksum)"
+    fields: ClassVar[str] = "files(mimeType, id, name, size, sha256Checksum)"
     
     def __post_init__(self):
         self.path = (TELEM_DL_FOLDER / self.name).with_suffix(".ibt")
@@ -39,3 +40,6 @@ class TelemetryFiles:
     def __init__(self, ibt, csv):
         self.ibt = ibt
         self.csv = csv
+
+    def __repr__(self):
+        return f"TelemFile({self.ibt.path.stem})"

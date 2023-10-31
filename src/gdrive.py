@@ -7,7 +7,9 @@ import io
 from hashlib import sha256
 import pathlib
 from filemeta import IbtFileMeta, CsvFileMeta, TelemetryFiles
-from queue import Queue
+import multiprocessing as mp
+
+from contextlib import contextmanager
 
 VERIFY_TYPE = "sha256Checksum"
 
@@ -17,45 +19,87 @@ class SHAVerifier:
     def verify(file, expected_digest):
         hasher = sha256()
         # file: bytes io obj
-        hasher.update(file.getvalue())
+        hasher.update(file.read())
         SHAVerifier.cur_digest = hasher.hexdigest()
         return (hasher.hexdigest(), hasher.hexdigest() == expected_digest)
 
 
 class DriveApiHandler:
-    def __init__(self, creds_file, scope=["https://www.googleapis.com/auth/drive"]):
+    def __init__(self, 
+                 creds_file, 
+                 scope=["https://www.googleapis.com/auth/drive"], 
+                 max_procs=4, 
+                 max_filesize=10*0x400*0x400*0x400):
+
         self.creds = service_account.Credentials.from_service_account_file(filename=creds_file, scopes=scope)
-        self.drive = build("drive", "v3", credentials=self.creds)
+
+        # serviceq is for putting service objects needed in a thread-safe manner
+        # ONLY ACCESS THROUGH self._get_service() method
+        self._mp_manager = mp.Manager()
+        self._serviceq = self._mp_manager.Queue(maxsize=max_procs)
+        for i in range(max_procs):
+            self._serviceq.put(build("drive", "v3", credentials=self.creds))
+        self._max_filesize = max_filesize
+
+
+    def download_files_async(self, files):
+        procs = [mp.Process(target=self.download_file, args=(file,)) for file in files]
+
+        # start procs
+        for proc in procs:
+            proc.start()
+
+        for proc in procs:
+            proc.join()
+
+        return list(map(lambda p: True if p.exitcode==0 else False, procs))
+
+
 
 
     def download_file(self, file_meta):
-        content_request = self.drive.files().get_media(fileId=file_meta.ibt.g_id, acknowledgeAbuse=True)
-        file = io.BytesIO()
-        downloader = MediaIoBaseDownload(file, content_request)
-        done = False
-        print(f"Downloading to {file_meta.ibt.path}: {0:>3}%\r", end='')
-        while not done:
-            status, done = downloader.next_chunk()
-            print(f"Downloading to {file_meta.ibt.path}: {int(status.progress()*100)}%\r", end='')
-        print()
+        # Thread-safe implementation of downloading files from Google Drive
 
-        digest, verified = SHAVerifier.verify(file, file_meta.ibt.g_checksum)
-        if not verified:
-            print("File Integrity failed.") 
-            print(f"Expected: {file_meta.ibt.g_checksum}\nGot: {digest}")
-            print(f"Ignoring file {file_meta.ibt.name}")
-            return False
-        
-        ret = True
-        with open(file_meta.ibt.path, 'wb') as f:
-            try:
-                f.write(file.getvalue())
-            except OSError as e:
-                print(e)
-                print(f"OS Error. Ignoring file {file_meta.ibt.name}")
-                ret = False
+        # Do not download the file if it is too big
+        if file_meta.ibt.filesize > self._max_filesize:
+            file_meta.ibt.path.unlink()
+            print(f"Could not download file {file_meta.ibt.name} - too big")
 
-        return ret
+        # Get a service
+        with self._get_service() as service:
+            content_request = service.files().get_media(fileId=file_meta.ibt.g_id, acknowledgeAbuse=True)
+
+            # directly write the file to the disk
+            with open(file_meta.ibt.path, "wb") as ibt:
+                downloader = MediaIoBaseDownload(ibt, content_request)
+                done = False
+                print(f"Downloading to {file_meta.ibt.path}:\r", end='')
+                too_big = False
+                while not done:
+                    status, done = downloader.next_chunk()
+
+                    # Ensure that the file is not too big to download
+                    if status.total_size > self._max_filesize:
+                        print(f"File {file_meta.ibt.name}"
+                              f"({(status.total_size//self._max_filesize)*10}GB) is too big to download")
+
+                        break
+                    print(f"Downloading to {file_meta.ibt.path}: {int(status.progress()*100):>3}%\r", end='')
+                print()
+
+
+        # Verify the SHA256 checksum
+        with open(file_meta.ibt.path, "rb") as file:
+            digest, verified = SHAVerifier.verify(file, file_meta.ibt.g_checksum)
+            if not verified:
+                print("File Integrity failed.") 
+                print(f"Expected: {file_meta.ibt.g_checksum}\nGot: {digest}")
+                print(f"Ignoring file {file_meta.ibt.name}")
+                return False
+            
+        return True
+
+
 
     def get_folder_id(self, pattern, parent=None):
         if not pattern:
@@ -74,7 +118,9 @@ class DriveApiHandler:
 
         #Finds ibt files in the folder_id
         query = f"name contains '{namecontains}' and '{folder_id}' in parents"
-        results = self._api_call(self.drive.files().list, path='files', q=query, fields=IbtFileMeta.fields)
+        with self._get_service() as service:
+            results = self._api_call(service.files().list, path='files', q=query, fields=IbtFileMeta.fields)
+
         if not results:
             raise IOError(f"{results=}, {IbtFileMeta.fields=}, {query=}")
         return map(
@@ -83,6 +129,7 @@ class DriveApiHandler:
                     x["id"], 
                     x["mimeType"], 
                     x["sha256Checksum"], 
+                    int(x["size"]),
                     folder_id), 
                 results
             )
@@ -98,13 +145,19 @@ class DriveApiHandler:
         }
         media = MediaFileUpload(file.csv.path.as_posix(), mimetype=file.csv.mimeType, resumable=False)
         print(f"Uploading file {file.csv.path.as_posix()}")
-        try:
-            g_file = self.drive.files().create(body=metadata, uploadType="multipart", media_body=media, fields='id').execute()
-        except HttpError as e:
-            print(e)
-            print(f"IGNORING {file.csv.path.as_posix()}")
-        else:
-            file.csv.g_id = g_file["id"]
+        with self._get_service() as service:
+            try:
+                g_file = service.files()\
+                                .create(body=metadata, 
+                                        uploadType="multipart", 
+                                        media_body=media, 
+                                        fields='id')\
+                                .execute()
+            except HttpError as e:
+                print(e)
+                print(f"IGNORING {file.csv.path.as_posix()}")
+            else:
+                file.csv.g_id = g_file["id"]
 
         return file
 
@@ -118,7 +171,9 @@ class DriveApiHandler:
         if parent:
             query += f" and '{parent}' in parents"
 
-        return self._api_call_ret_single(self.drive.files().list, path='files/_0/id', q=query, fields=fields)
+        with self._get_service() as service:
+            result = self._api_call_ret_single(service.files().list, path='files/_0/id', q=query, fields=fields)
+        return result
 
 
     def _dict_get_wrapper(self, key, parent=None, resource=None):
@@ -181,3 +236,14 @@ class DriveApiHandler:
         #print(f"_traverse_nested: Exiting from  {method=}, {path=}, {resource=}")
 
         return parent
+
+    @contextmanager
+    def _get_service(self):
+        # acquire a service from the queue
+        service = self._serviceq.get()
+        try:
+            yield service
+        finally:
+            # When the thread is done, return the service to the queue
+            self._serviceq.put(service)
+

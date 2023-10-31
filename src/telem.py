@@ -27,21 +27,43 @@ class TelemDataHandler:
         
     def download_unprocessed_ibt(self):
         # Downloads unprocessed ibt files and returns a list of TelemetryFiles()
-        files = list(map(lambda x: TelemetryFiles(x, CsvFileMeta(x.name, self.g_csv_pathid)),
-                     self.service.get_ibt_file_info(self.g_ibt_pathid)))
-        if not files:
-            raise IOError(f"{files=}, {self.g_ibt_pathid=}")
+        # Filters out files whose ids are already in .ibtignore
+        files = list(
+            map(
+                lambda x: TelemetryFiles(x, CsvFileMeta(x.name, self.g_csv_pathid)),
+                filter(lambda f: self._filter_ignores(f),
+                         self.service.get_ibt_file_info(self.g_ibt_pathid)
+                )
+            )
+        )
+
+        downloads_status = self.service.download_files_async(files)
         downloaded_files = []
-        
-        # read file of the ids that have already been read and ignore them
-        for file in files:
-            if file.ibt.g_id in self.ignores:
-                print(f"File {file.ibt.name} already processed - ignoring")
+
+        for file, status in zip(files, downloads_status):
+            if not status:
+                print(f"Error downloading {file.ibt.name} - skipping")
                 continue
-                
-            # We've not seen this file yet. Process it
-            if self.service.download_file(file):
-                downloaded_files.append(file)
+            print(f"Downloaded {file.ibt.name}")
+            downloaded_files.append(file)
+
+
+        '''
+        with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
+            future_dl = {executor.submit(self.service.download_file, file):file for file in files}
+            for future in concurrent.futures.as_completed(future_dl):
+                try:
+                    l_ibt = future.result()
+                except Exception as e:
+                    print(future.exception())
+                    print(f"Error downloading {future_dl[future].ibt.name}. Skipping")
+                else:
+                    if not future.result():
+                        print(f"{future_dl[future].ibt.name} could not be downloaded.")
+                        continue
+                    print(f"{future_dl[future].ibt.name} downloaded.")
+                    downloaded_files.append(future_dl[future])
+        '''
 
         return downloaded_files 
 
@@ -50,30 +72,40 @@ class TelemDataHandler:
         # Process the ibt files with the executable
         # process the ibt files by file name 
         to_upload = []
-        for file in files:
-            if self._exec_stint_util(file) == 0:
-                # successfully extracted data from the .ibt file
-                to_upload.append(file)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            processes = {executor.submit(self._exec_stint_util, file): file for file in files}
+            for future in concurrent.futures.as_completed(processes):
+                try:
+                    retval = future.result()
+                except Exception as e:
+                    print(e)
+                    print(f"Error processing {processes[future].ibt.name}. Skipping")
+                else:
+                    if retval == 0:
+                        to_upload.append(processes[future])
 
-                # delete ibt file after the data is extracted
-                file.ibt.path.unlink()
+        # Delete all ibt files
+        for file in files:
+            file.ibt.path.unlink()
             
         return to_upload
 
 
     def upload_csv_files(self, files):
-        # TODO: IMPLEMENT FILEMETA class
-        # Track upload status for each uploading thread
         uploaded = []
-        for f in files:
-            self.service.upload_file(f)
-            self.ignores.add(f.csv.g_id)
-        #with concurrent.futures.ThreadPoolExecutor() as executor:
-        #    uploads = [executor.submit(self.service.upload_file, f) for f in files]
-        #    for future in concurrent.futures.as_completed(uploads):
-        #        print(future.result())
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            uploads = {executor.submit(self.service.upload_file, f): f for f in files}
+            for future in concurrent.futures.as_completed(uploads):
+                try:
+                    telem_meta = future.result()
+                except Exception as e:
+                    print(e)
+                    print(f"Error uploading {uploads[future].csv.name}. Skipping.")
+                else:
+                    if telem_meta.csv.g_id:
+                        self.ignores.add(telem_meta.ibt.g_id)
+                        uploaded.append(telem_meta)
 
-        # TODO: add to ignore list
 
         # Once the csv files are all uploaded, write to ignores file
         with open(self.ibt_ignores_txt, "w") as f:
@@ -81,6 +113,13 @@ class TelemDataHandler:
                 f.write(id+'\n')
 
         return uploaded
+
+
+    def _filter_ignores(self, ibt):
+        if ibt.g_id in self.ignores:
+            print(f"File {ibt.name} already processed - ignoring")
+            return False
+        return True
 
     def _exec_stint_util(self, files, vars=None):
         if not vars:
@@ -94,11 +133,12 @@ class TelemDataHandler:
             "-o", files.csv.path.as_posix(),
             (files.ibt.path).as_posix()
         ]
-
+        print(f"Extracting data from {files.ibt.path.as_posix()}")
         with subprocess.Popen(exec, stdout=sys.stdout, stderr=sys.stderr) as proc:
             while proc.poll() is None:
                 pass
             retcode = proc.poll()
+        print("Completed")
 
         return retcode
 
