@@ -37,9 +37,10 @@ class TelemDataHandler:
             )
         )
 
-        downloads_status = self.service.download_files_async(files)
+        #downloads_status = self.service.download_files_async(files)
         downloaded_files = []
 
+        '''
         for file, status in zip(files, downloads_status):
             if not status:
                 print(f"Error downloading {file.ibt.name} - skipping")
@@ -49,7 +50,7 @@ class TelemDataHandler:
 
 
         '''
-        with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             future_dl = {executor.submit(self.service.download_file, file):file for file in files}
             for future in concurrent.futures.as_completed(future_dl):
                 try:
@@ -63,7 +64,6 @@ class TelemDataHandler:
                         continue
                     print(f"{future_dl[future].ibt.name} downloaded.")
                     downloaded_files.append(future_dl[future])
-        '''
 
         return downloaded_files 
 

@@ -7,8 +7,7 @@ import io
 from hashlib import sha256
 import pathlib
 from filemeta import IbtFileMeta, CsvFileMeta, TelemetryFiles
-import multiprocessing as mp
-
+from queue import Queue
 from contextlib import contextmanager
 
 VERIFY_TYPE = "sha256Checksum"
@@ -35,26 +34,10 @@ class DriveApiHandler:
 
         # serviceq is for putting service objects needed in a thread-safe manner
         # ONLY ACCESS THROUGH self._get_service() method
-        self._mp_manager = mp.Manager()
-        self._serviceq = self._mp_manager.Queue(maxsize=max_procs)
+        self._serviceq = Queue(maxsize=max_procs)
         for i in range(max_procs):
             self._serviceq.put(build("drive", "v3", credentials=self.creds))
         self._max_filesize = max_filesize
-
-
-    def download_files_async(self, files):
-        procs = [mp.Process(target=self.download_file, args=(file,)) for file in files]
-
-        # start procs
-        for proc in procs:
-            proc.start()
-
-        for proc in procs:
-            proc.join()
-
-        return list(map(lambda p: True if p.exitcode==0 else False, procs))
-
-
 
 
     def download_file(self, file_meta):
