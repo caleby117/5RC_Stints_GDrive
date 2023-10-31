@@ -37,19 +37,8 @@ class TelemDataHandler:
             )
         )
 
-        #downloads_status = self.service.download_files_async(files)
         downloaded_files = []
 
-        '''
-        for file, status in zip(files, downloads_status):
-            if not status:
-                print(f"Error downloading {file.ibt.name} - skipping")
-                continue
-            print(f"Downloaded {file.ibt.name}")
-            downloaded_files.append(file)
-
-
-        '''
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             future_dl = {executor.submit(self.service.download_file, file):file for file in files}
             for future in concurrent.futures.as_completed(future_dl):
@@ -71,6 +60,8 @@ class TelemDataHandler:
     def process_ibt_files(self, files):
         # Process the ibt files with the executable
         # process the ibt files by file name 
+        # Use multithreading as we are already spawning new processes from this so the GIL 
+        # doesn't really matter at all
         to_upload = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             processes = {executor.submit(self._exec_stint_util, file): file for file in files}
