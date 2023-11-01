@@ -7,6 +7,7 @@ import io
 from hashlib import sha256
 import pathlib
 from filemeta import IbtFileMeta, CsvFileMeta, TelemetryFiles
+import concurrent.futures
 from queue import Queue
 from contextlib import contextmanager
 
@@ -38,6 +39,25 @@ class DriveApiHandler:
         for i in range(max_procs):
             self._serviceq.put(build("drive", "v3", credentials=self.creds))
         self._max_filesize = max_filesize
+
+    def download_files_async(self, files):
+        downloaded_files = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(self.download_file, file):file for file in files}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    l_ibt = future.result()
+                except Exception as e:
+                    print(future.exception())
+                    print(f"Error downloading {futures[future].ibt.name}. Skipping")
+                else:
+                    if not future.result():
+                        print(f"{futures[future].ibt.name} could not be downloaded.")
+                        continue
+                    print(f"{futures[future].ibt.name} downloaded")
+                    downloaded_files.append(futures[future])
+        return downloaded_files
+
 
 
     def download_file(self, file_meta):

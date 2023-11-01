@@ -37,24 +37,7 @@ class TelemDataHandler:
             )
         )
 
-        downloaded_files = []
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            future_dl = {executor.submit(self.service.download_file, file):file for file in files}
-            for future in concurrent.futures.as_completed(future_dl):
-                try:
-                    l_ibt = future.result()
-                except Exception as e:
-                    print(future.exception())
-                    print(f"Error downloading {future_dl[future].ibt.name}. Skipping")
-                else:
-                    if not future.result():
-                        print(f"{future_dl[future].ibt.name} could not be downloaded.")
-                        continue
-                    print(f"{future_dl[future].ibt.name} downloaded.")
-                    downloaded_files.append(future_dl[future])
-
-        return downloaded_files 
+        return self.service.download_files_async(files)
 
 
     def process_ibt_files(self, files):
