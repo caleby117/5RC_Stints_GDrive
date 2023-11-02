@@ -10,6 +10,7 @@ from filemeta import IbtFileMeta, CsvFileMeta, TelemetryFiles
 import concurrent.futures
 from queue import Queue
 from contextlib import contextmanager
+import traceback
 
 VERIFY_TYPE = "sha256Checksum"
 
@@ -24,6 +25,26 @@ class SHAVerifier:
         return (hasher.hexdigest(), hasher.hexdigest() == expected_digest)
 
 
+class ServiceProvider:
+    '''
+    Helper object that provides the thread-safe queue for each api service object.
+    Each thread using its own service will ensure that api calls and downloads are done in parallel.
+    '''
+    def __init__(self, api, ver, creds, maxprocs=4):
+        self.serviceq = Queue(maxsize=max_procs)
+        for i in range(max_procs):
+            self.serviceq.put(build(api, ver, credentials=creds))
+    
+    @contextmanager
+    def get_service(self):
+        service = self.serviceq.get()
+        try:
+            yield service
+        finally:
+            self.serviceq.put(service)
+
+
+
 class DriveApiHandler:
     def __init__(self, 
                  creds_file, 
@@ -35,12 +56,10 @@ class DriveApiHandler:
 
         # serviceq is for putting service objects needed in a thread-safe manner
         # ONLY ACCESS THROUGH self._get_service() method
-        self._serviceq = Queue(maxsize=max_procs)
-        for i in range(max_procs):
-            self._serviceq.put(build("drive", "v3", credentials=self.creds))
+        self.provider = ServiceProvider("drive", "v3", self.creds)
         self._max_filesize = max_filesize
 
-    def download_files_async(self, files):
+    def download_files(self, files):
         downloaded_files = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             futures = {executor.submit(self.download_file, file):file for file in files}
@@ -48,7 +67,7 @@ class DriveApiHandler:
                 try:
                     l_ibt = future.result()
                 except Exception as e:
-                    print(future.exception())
+                    traceback.print_exception(future.exception())
                     print(f"Error downloading {futures[future].ibt.name}. Skipping")
                 else:
                     if not future.result():
@@ -69,7 +88,7 @@ class DriveApiHandler:
             print(f"Could not download file {file_meta.ibt.name} - too big")
 
         # Get a service
-        with self._get_service() as service:
+        with self.provider.get_service() as service:
             content_request = service.files().get_media(fileId=file_meta.ibt.g_id, acknowledgeAbuse=True)
 
             # directly write the file to the disk
@@ -124,8 +143,6 @@ class DriveApiHandler:
         with self._get_service() as service:
             results = self._api_call(service.files().list, path='files', q=query, fields=IbtFileMeta.fields)
 
-        if not results:
-            raise IOError(f"{results=}, {IbtFileMeta.fields=}, {query=}")
         return map(
                 lambda x: IbtFileMeta(
                     x["name"], 
@@ -137,10 +154,27 @@ class DriveApiHandler:
                 results
             )
 
+    
+    def upload_files(self, files):
+        # Uploads files to google drive
+        uploaded = []
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            uploads = {executor.submit(self.service.upload_file, f): f for f in files}
+            for future in concurrent.futures.as_completed(uploads):
+                try:
+                    telem_meta = future.result()
+                except Exception as e:
+                    traceback.print_exception(future.exception())
+                    print(f"Error uploading {uploads[future].csv.name}. Skipping.")
+                else:
+                    if telem_meta.csv.g_id:
+                        self.ignores.add(telem_meta.ibt.g_id)
+                        uploaded.append(telem_meta)
+        return uploaded
 
-    def upload_file(self, file): #csv_to_upload, parentid='', meta_mimetype='', upload_mimetype=''):
-        # Takes in filemeta obj and returns same object but updated
-        # Returns file id
+
+    def upload_file(self, file): 
+        # Takes in filemeta obj and returns same object but updated with the new fileid
         metadata = {
             "name": file.csv.path.name,
             "mimeType": file.csv.mimeType,
@@ -148,7 +182,7 @@ class DriveApiHandler:
         }
         media = MediaFileUpload(file.csv.path.as_posix(), mimetype=file.csv.mimeType, resumable=False)
         print(f"Uploading file {file.csv.path.as_posix()}")
-        with self._get_service() as service:
+        with self.provider.get_service() as service:
             try:
                 g_file = service.files()\
                                 .create(body=metadata, 
@@ -157,7 +191,7 @@ class DriveApiHandler:
                                         fields='id')\
                                 .execute()
             except HttpError as e:
-                print(e)
+                traceback.print_exc()
                 print(f"IGNORING {file.csv.path.as_posix()}")
             else:
                 file.csv.g_id = g_file["id"]

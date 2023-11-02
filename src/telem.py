@@ -37,7 +37,7 @@ class TelemDataHandler:
             )
         )
 
-        return self.service.download_files_async(files)
+        return self.service.download_files(files)
 
 
     def process_ibt_files(self, files):
@@ -66,20 +66,8 @@ class TelemDataHandler:
 
 
     def upload_csv_files(self, files):
-        uploaded = []
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            uploads = {executor.submit(self.service.upload_file, f): f for f in files}
-            for future in concurrent.futures.as_completed(uploads):
-                try:
-                    telem_meta = future.result()
-                except Exception as e:
-                    print(e)
-                    print(f"Error uploading {uploads[future].csv.name}. Skipping.")
-                else:
-                    if telem_meta.csv.g_id:
-                        self.ignores.add(telem_meta.ibt.g_id)
-                        uploaded.append(telem_meta)
-
+        # Passes the csv files to the drive object to upload
+        uploaded = self.service.upload_files(files)
 
         # Once the csv files are all uploaded, write to ignores file
         with open(self.ibt_ignores_txt, "w") as f:
