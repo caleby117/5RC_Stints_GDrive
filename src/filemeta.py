@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from pathlib import Path
-from telempaths import ROOT, CREDS, IBT_READER_PATH, TELEM_DL_FOLDER, TELEM_CSV_FOLDER
 from typing import ClassVar
 
 @dataclass
@@ -19,8 +18,14 @@ class IbtFileMeta(FileMeta):
     fields: ClassVar[str] = "files(mimeType, id, name, size, sha256Checksum)"
     
     def __post_init__(self):
-        self.path = (TELEM_DL_FOLDER / self.name).with_suffix(".ibt")
+        self.path = Path(self.name).with_suffix(".ibt")
         self.ext = self.path.suffix
+    
+    def set_path(self, dir):
+        self.path = dir/self.path
+
+    def delete(self):
+        self.path.unlink(missing_ok=True)
 
 @dataclass
 class CsvFileMeta(FileMeta):
@@ -28,18 +33,22 @@ class CsvFileMeta(FileMeta):
     g_parentid: str
     def __post_init__(self):
         self.mimeType = "text/csv"
-        self.path = (TELEM_CSV_FOLDER / self.name).with_suffix(".csv")
+        self.path =  Path(self.name).with_suffix(".csv")
         self.g_id = ""
         self.name = self.path.name
     
+    def set_path(self, dir):
+        self.path = dir/self.path
 
-
+    def delete(self):
+        self.path.unlink(missing_ok=True)
 
 class TelemetryFiles:
     # takes in an ibt file meta and a csv file meta
-    def __init__(self, ibt, csv):
+    def __init__(self, ibt, csv, driver):
         self.ibt = ibt
         self.csv = csv
+        self.driver = driver
 
     def __repr__(self):
         return f"TelemFile({self.ibt.path.stem})"

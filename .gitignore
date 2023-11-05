@@ -161,6 +161,7 @@ cython_debug/
 
 # Telemetry
 telem/
+telemetry/
 
 # Google Drive Credentials
 creds/
@@ -168,3 +169,5 @@ creds/
 # Don't reveal the file id or paths of the files that we're working with!
 .ibtignore
 
+# vim sessions
+*.vim
