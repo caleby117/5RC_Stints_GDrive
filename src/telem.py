@@ -10,7 +10,14 @@ from threading import Thread
 
 
 class TelemDataHandler:
-    def __init__(self, l_ibt_path, l_csv_path, g_ibt_pathpat="telemetry/ibt", g_csv_pathpat="telemetry/csv", ibt_ignores_txt=Path().cwd()/".ibtignore", ibt_reader_path=None, creds=''):
+    def __init__(self, 
+                 l_ibt_path, 
+                 l_csv_path, 
+                 g_ibt_pathpat="telemetry/ibt", 
+                 g_csv_pathpat="telemetry/csv", 
+                 ibt_ignores_txt=Path().cwd()/".ibtignore", 
+                 ibt_reader_path=None, 
+                 creds=''):
         self.l_ibt_path = l_ibt_path
         self.l_csv_path = l_csv_path
         self.ibt_reader_path = ibt_reader_path
@@ -154,7 +161,8 @@ class TelemDataHandler:
         Write to ibtignore file once the files are successfully uploaded
         '''
         uploaded = self.service.upload_files(files)
-        self.ignores.update(*[file.csv.g_id for file in uploaded])
+        for file in uploaded:
+            self.ignores.add(file.ibt.g_id)
 
         # Once the csv files are all uploaded, write to ignores file
         self.write_ibtignores()

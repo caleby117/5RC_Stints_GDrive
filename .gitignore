@@ -171,3 +171,6 @@ creds/
 
 # vim sessions
 *.vim
+
+# fs cache
+cache/

@@ -1,32 +1,28 @@
-from gdrive import DriveApiHandler
+from gdrive import DriveApiHandler, _api_call
 from telem import TelemDataHandler
 from driver import Driver
 from pathlib import Path
 from config import Config
 import argparse
 from sys import argv
+from pprint import PrettyPrinter
 
 
 def main():
     '''
     main.py:
         - Searches the google drive for .ibt files to download
-        - Downloads the ibt files into some temp storage and runs the 5RC_Stint_Time_Util on it to produce a csv file
+        - Downloads the ibt files into some temp storage and runs the 
+            5RC_Stint_Time_Util on it to produce a csv file
         - Uploads the csv file to the drive
         - Removes the temp storage
 
-    '''
-
-    # define creds and scope of the API calls on behalf of the service account
-
-    '''
-    USE THE GOOGLE DRIVE API TO DO THE REQUESTS
-        developers.google.com/drive/api/reference/rest/v3
 
     '''
     argparser = argparse.ArgumentParser(
                             prog="5RC_Stints_GDrive",
-                            description="A tool that converts .ibt files to .csv files on a lap by lap basis"
+                            description="A tool that converts .ibt files to"
+                                ".csv files on a lap by lap basis"
                             )
 
     argparser.add_argument('-c', '--config_from')
@@ -53,6 +49,11 @@ def main():
     TELEM_IBT_FOLDER = ROOT/Config.instance().PATHS.ibt_folder
     IBT_READER_PATH  = ROOT/Config.instance().GENERAL.ibt_reader_path
     IBT_IGNORE = ROOT/Config.instance().PATHS.ibt_ignore 
+    try:
+        cache_file = Config.instance().PATHS.fs_cache
+        Config.instance().PATHS.fs_cache = ROOT/cache_file
+    except AttributeError:
+        pass
 
     # Create folders if they do not exist 
     TELEM_CSV_FOLDER.mkdir(parents=True, exist_ok=True)
@@ -64,19 +65,27 @@ def main():
                              ibt_reader_path=IBT_READER_PATH, 
                              ibt_ignores_txt=IBT_IGNORE)
 
-    # Get the list of drivers' telemetry to download
-    DRIVERS = list(map(lambda x: Driver(x, telem=telem), Config.instance().DRIVERS.keys))
-    
-    # TODO: Perform the check based on driver's names
-    '''
-    ibt_files = telem.download_drivers_ibt(DRIVERS)
-    csv_to_upload = telem.process_telemetry(ibt_files)
-    '''
+    # Create Drivers object to track ownership of files and send them to 
+    # the right paths
+    DRIVERS = list(map(lambda x: Driver(x, telem=telem), 
+                       Config.instance().DRIVERS.keys)
+                   )
+    get_and_process_all(telem, DRIVERS)
 
-    ibt_files = telem.download_drivers_ibt(DRIVERS)
+
+def get_and_process_all(telem, drivers):
+    
+    # Download the drivers' ibt files
+    ibt_files = telem.download_drivers_ibt(drivers)
+
+    # Process files with the ibt telem util
     csv_to_upload = telem.process_telemetry(ibt_files)
+
+    # Upload the files to the google drive
     uploaded_files = telem.upload_csv_files(csv_to_upload)
-    telem.cleanup(DRIVERS)
+    
+    # Clean up all the files
+    telem.cleanup(drivers)
     print(uploaded_files)
     
 

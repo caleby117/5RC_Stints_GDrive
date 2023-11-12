@@ -1,22 +1,26 @@
-import google.auth
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2 import service_account
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
-import io
 from hashlib import sha256
-import pathlib
-from filemeta import IbtFileMeta, CsvFileMeta, TelemetryFiles
+from filemeta import IbtFileMeta
 import concurrent.futures
 from queue import Queue
 from contextlib import contextmanager
 import traceback
 from config import Config
 from pathlib import Path, PurePath
+from pickle import Pickler, Unpickler
 
 VERIFY_TYPE = "sha256Checksum"
 
 class DriveFolder:
+    '''
+    Fetched Google Drive folder metadata. Basically a node in the file system tree that we will build 
+    as a local cache to reduce API calls and speed up file system traversal
+    - will probably make this more generic in the future to refer to files as well since Google treats 
+        folders as such
+    '''
     def __init__(self, name, id):
         self.name = name
         self.id = id
@@ -61,8 +65,7 @@ class DriveFolder:
     
     def get_longest_existing_path(self, path):
         '''
-        Gets longest existing path relative to this folder
-        
+        Gets longest path from <path> that exists in this cache
         '''
 
         if not path.name:
@@ -99,6 +102,9 @@ class DriveFSHelper:
 
 
     def split_by_existence(self, path):
+        '''
+        Splits path into two parts: an existing part and a nonexistent part
+        '''
         longest_existing = self.fs.get_longest_existing_path(path)
         
         # get the path of the existing parent
@@ -109,8 +115,10 @@ class DriveFSHelper:
 
     def create_cached_path(self, exists, nexists, ids):
         '''
-        Creates folder at path and creates the folders on the remote while the util is running.
-            - Generate file ids now?
+        Creates folders in this cache with all parent directories in nexists
+            - exists: Current path that exist in the fs
+            - nexists: Path relative to <exists> to create
+            - ids: List of pre-generated ids to assign to the new folders
         '''
 
         existing_leaf = self.fs.get(exists)
@@ -128,13 +136,14 @@ class DriveFSHelper:
 
 
 class SHAVerifier:
-    cur_digest = ""
+    '''
+    Helper class that helps to verify the SHA256 hash of a file
+    '''
     @staticmethod
     def verify(file, expected_digest):
         hasher = sha256()
         # file: bytes io obj
         hasher.update(file.read())
-        SHAVerifier.cur_digest = hasher.hexdigest()
         return (hasher.hexdigest(), hasher.hexdigest() == expected_digest)
 
 
@@ -142,6 +151,8 @@ class ServiceProvider:
     '''
     Helper object that provides the thread-safe queue for each api service object.
     Each thread will use its own service and owns its state.
+    Thereafter the thread will return the service back into the queue to be used 
+    by the next thread
     '''
     def __init__(self, api, ver, creds, max_threads=4):
         self.serviceq = Queue(maxsize=max_threads)
@@ -159,6 +170,15 @@ class ServiceProvider:
 
 
 class DriveApiHandler:
+    '''
+    Handles sending API requests/queries and parsing the results for this application
+    - API call functions are thread-safe. Specify the max number of threads on init.
+    - googleapiclient.build() returns an object that has the same following methods as found in:
+        developers.google.com/drive/api/reference/rest/v3
+
+    - may break this up into smaller classes in the future
+    - may also edit this class to make it more generic
+    '''
     def __init__(self, 
                  scope=["https://www.googleapis.com/auth/drive"], 
                  max_threads=4, 
@@ -182,9 +202,36 @@ class DriveApiHandler:
         self.g_root = None #DriveFolder(root_info["name"], root_info["id"])
         self.build_fs()
 
+    def __del__(self):
+        '''
+        Save the cached state of the filesystem folders
+        '''
+        try:
+            cache_path = Path(Config.instance().PATHS.fs_cache)
+            save_cache = int(Config.instance().GENERAL.save_cache)
+        except AttributeError:
+            # No file specified to save cache in
+            return
+        if not save_cache:
+            return 
+        self.save_cache(cache_path)
 
+    def save_cache(self, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(path, "wb") as f:
+                p = Pickler(f)
+                p.dump(self.g_root)
+        except FileNotFoundError:
+            print(f"File {path} not found.")
+            print("Unable to save cache")
+            return 
+        print("fs cache saved")
 
     def download_files(self, files):
+        '''
+        Download files from Google Drive
+        '''
         downloaded_files = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_threads) as executor:
             futures = {executor.submit(self.download_file, file):file for file in files}
@@ -201,8 +248,6 @@ class DriveApiHandler:
                     print(f"{futures[future].ibt.name} downloaded")
                     downloaded_files.append(futures[future])
         return downloaded_files
-
-
 
     def download_file(self, file_meta):
         # Thread-safe implementation of downloading files from Google Drive
@@ -249,13 +294,18 @@ class DriveApiHandler:
         '''
         Makes a local representation of the gdrive fs (folders only) rooted at root
         dfs traverse the file system
+        Read from pickle unless specifically told not to in the config
         '''
+       
+        if self.load_fs_cache():
+            return 
 
         # Get a list of all available folders
         all_folders = self._get_folders_info_priv()
 
         # cache parent-child relationships
         # edge(id1, id2) => id1 is parent of id2
+        # ie cache[parentid] = [{child name and id}, {child name and id} ... ]
 
         cache = {}
         # print(all_folders)
@@ -285,7 +335,6 @@ class DriveApiHandler:
                 child = DriveFolder(folder["name"], folder["id"])
                 cur_folder.add_child(child)
                 to_search.append(child)
-        
     
     def get_fs_root(self):
         return self.g_root
@@ -296,7 +345,6 @@ class DriveApiHandler:
         """
         # print(path)
         return self.g_root.get(PurePath(path)).id
-
 
 
     def get_folders_info(self, pattern, parent=None):
@@ -395,6 +443,7 @@ class DriveApiHandler:
                 traceback.print_exc()
                 print(f"IGNORING {file.csv.path.as_posix()}")
             else:
+                print(g_file)
                 file.csv.g_id = g_file["id"]
 
         return file
@@ -413,6 +462,47 @@ class DriveApiHandler:
         return id
 
 
+    def get_folder_info(self, name, parent=None, **kwargs):
+        # accepts paths and traverses the filesystem recursively to get to the correct folder
+        fields = "files(id, name, parents)"
+        query = f"mimeType='application/vnd.google-apps.folder' and name='{name}'"
+
+        # if this is a subfolder from a specified parent
+        if parent:
+            query += f" and '{parent}' in parents"
+
+        with self.provider.get_service() as service:
+            try:
+                result = _api_call_ret_single(service.files().list, path='files/_0', q=query, fields=fields)
+            except (KeyError, IndexError):
+                print(f"Get folder id: {name} not found")
+                result = ''
+        return result
+
+
+    def load_fs_cache(self):
+        '''
+        Loads file system cache from pickle file 
+        '''
+        if not int(Config.instance().GENERAL.use_cache):
+            return False
+
+        try:
+            cache_file = Config.instance().PATHS.fs_cache
+        except NameError:
+            print(f"Error: No fs_cache file specified")
+            return False
+        try:
+            with open(cache_file, "rb") as f:
+                up = Unpickler(f)
+                self.g_root = up.load()
+                return True
+        except FileNotFoundError:
+            print("Unable to read from cache")
+            print(f"File {cache_file} not found")
+            return False
+
+
     def _get_folders_info_priv(self, **kwargs):
         '''
         Gets all folders
@@ -427,23 +517,9 @@ class DriveApiHandler:
         return result
 
 
-    def get_folder_info(self, name, parent=None, **kwargs):
-        # accepts paths and traverses the filesystem recursively to get to the correct folder
-        fields = "files(id, name, parents)"
-        query = f"mimeType='application/vnd.google-apps.folder' and name='{name}'"
-
-        # if this is a subfolder from a specified parent
-        if parent:
-            query += f" and '{parent}' in parents"
-
-        with self.provider.get_service() as service:
-            try:
-                result = _api_call_ret_single(service.files().list, path='files/_0', q=query, fields=fields)
-            except (KeyError, IndexError) as e:
-                print(f"Get folder id: {name} not found")
-                result = ''
-        return result
-
+'''
+Wrappers that allow for access to nested dicts using a path instead of multiple [][]'s
+'''
 
 def _dict_get_wrapper(key, parent=None, resource=None):
     # format for getting elements from list index: key="_<idx>"
@@ -475,8 +551,6 @@ def _api_call_ret_single(method, path=None, **kwargs):
 
 def _api_call(method, path=None, **kwargs):
     result = method(**kwargs).execute()
-    if not result:
-        raise IOError(f"{result=}, {kwargs=}")
     if path:
         return _traverse_nested(_dict_get_wrapper, path, resource=result)
     return result
